@@ -69,7 +69,7 @@ class Model:
             molecular_mass.append([molecular_mass_dict[molecule]])
             abundance_name = molecular_abundance_dict[molecule]
             integral_mol = self.integral_dict[molecule](my_temp) * (10 ** self.parameter_dict[abundance_name])
-            integral_molecules.append(integral_mol)
+            integral_molecules.append(integral_mol * molecular_mass_dict[molecule])
 
         integral_molecules_sum = np.sum(np.array(integral_molecules), axis=0)
 
@@ -87,28 +87,17 @@ class Model:
         except:   # set mean molecular mass if not given in input
             m = 2.0*xh2*amu + 4.0*xhe*amu + np.sum(mass_fraction*molecular_mass)
 
-        scale_height = kboltz * my_temp / m / G
-        ntot = 1 / kboltz / my_temp
-
-        integral_cia_h2h2 = self.integral_dict['cia_h2h2'](my_temp)
-        integral_cia_h2he = self.integral_dict['cia_h2he'](my_temp)
-        integral_grid_cia = xh2 * ntot * (xh2 * integral_cia_h2h2 + 0.1 * xh2 * integral_cia_h2he) / m
-
-        integral_grid_rayleigh = self.integral_dict['rayleigh'] * xh2
-
 
         if self.parameter_dict["log_P_cloudtop"] == "Off":   # cloud free
             cloud_tau = np.zeros((len(pressure_levels), len(self.x_full)))
 
-
         elif self.parameter_dict["Q0"] == "Off":   # grey cloud
-            cloudtop_pressure = (10**self.parameter_dict["log_P_cloudtop"])*1e6   # cloudtop_pressure = [100, 1e7]
+            cloudtop_pressure = (10**self.parameter_dict["log_P_cloudtop"])*1e6
             cloud_tau = np.zeros((len(pressure_levels), len(self.x_full)))
             cloud_tau[pressure_levels > cloudtop_pressure,:] = np.inf
 
-
         else:   # non-grey cloud
-            cloudtop_pressure = (10**self.parameter_dict["log_P_cloudtop"])*1e6   # cloudtop_pressure = [100, 1e7]
+            cloudtop_pressure = (10**self.parameter_dict["log_P_cloudtop"])*1e6
             bc = 10**self.parameter_dict["log_cloud_depth"]
             cloudbottom_pressure = bc*cloudtop_pressure
 
@@ -121,22 +110,40 @@ class Model:
             tau_nongrey = tau_ref * (Q0 * x_lambda_ref ** (-a) + x_lambda_ref ** 0.2) / (Q0 * x_lambda ** (-a) + x_lambda ** 0.2)
 
             cloud_tau = np.zeros((len(pressure_levels), len(self.x_full)))
-            cloud_tau[(pressure_levels > cloudtop_pressure) & (pressure_levels < cloudbottom_pressure),:] = tau_nongrey
+            cloud_tau[(pressure_levels > cloudtop_pressure) & (pressure_levels < cloudbottom_pressure),:] = tau_nongrey   # array of len(pressure_levels)
 
+
+        scale_height = kboltz * my_temp / m / G
+
+        integral_cia_h2h2 = self.integral_dict['cia_h2h2'](my_temp)
+        integral_cia_h2he = self.integral_dict['cia_h2he'](my_temp)
+
+        integral_grid_rayleigh = self.integral_dict['rayleigh'] * xh2
+
+        tau_values = np.zeros((len(pressure_levels), len(self.x_full)))
 
         for i, p in enumerate(pressure_levels):
-            P_cgs = p * 1e6
-            tau_factor = (np.sqrt(2.0 * np.pi * R0 * scale_height) / kboltz / my_temp) * P_cgs   # array of 200 points
+            ntot = p / kboltz / my_temp   # p already in cgs
+            integral_grid_cia = xh2 * ntot * (xh2 * integral_cia_h2h2 + 0.1 * xh2 * integral_cia_h2he)
 
-            tau_values = integral_molecules_sum + integral_grid_cia + integral_grid_rayleigh + cloud_tau  # array of (200,1458)
-            tau_values = tau_values * tau_factor
+            r = scale_height * np.log(p0_cgs / p)
+            factor = p * np.sqrt(2 * np.pi * scale_height * (R0 + r)) / kboltz / my_temp   # tau factor missing sigma
 
-        tau_integral_values = np.trapz(tau_values, pressure_levels, axis=0)  # do the integral over p, gives array of 1458
+            sigma_values = integral_molecules_sum[i] + integral_grid_cia[i] + integral_grid_rayleigh[i]   # array of (len(pressure_levels), len(x_full))
+            tau_values[i] = sigma_values * factor   # array of (len(pressure_levels), len(x_full))
 
-        r = R0 + scale_height * (gamma + np.log(tau_integral_values))
+
+        tau_values_int = tau_values + cloud_tau
+
+        h_integrand1 = (R0 + scale_height * np.log(p0_cgs / pressure_levels)) / pressure_levels   # array of len(pressure_levels)
+        h_integrand2 = 1 - np.exp(-tau_values_int)   # array of (len(pressure_levels), len(x_full))
+        h_integrand = (h_integrand2.T * h_integrand1).T   # vectorised h2*h1, gives array of (len(pressure_levels), len(x_full))
+        h_integral_values = np.trapz(h_integrand, pressure_levels, axis=0)   # do the integral over p, gives array of len(x_full)
+
+        h_values = (scale_height / R0) * h_integral_values
+        r = R0 + h_values
 
         result = 100.0 * (r / Rstar) ** 2  # return percentage transit depth
-
 
         return result
 
